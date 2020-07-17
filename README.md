@@ -1,3 +1,15 @@
+XIVshade
+=======
+An open-source fork of ReShade primarily targeted for Final Fantasy XIV with the aim of providing a more from-scratch experience while still hosting a powerful bundled library of shaders.
+
+The goals of this project are to:
+- Provide transparency for modifications to the this and the base ReShade project.
+- Enable better optimizations for ReShade Post Processing in Final Fantasy XIV.
+- Host special shaders and effects best used for Final Fantasy XIV.
+- Allow users to enjoy a from-scratch experience closer to the original ReShade project.
+
+This project is geared towards users who want more confidence and control in their use of ReShade and FF14. Because of so, community presets are not included and shaders will not use community assets (unless a shader is built/optimized with one).
+
 ReShade
 =======
 
