@@ -9,21 +9,19 @@
 
 #pragma region Import intrinsic functions
 
-using namespace reshadefx;
-
 struct intrinsic
 {
-	intrinsic(const char *name, unsigned int id, const type &ret_type, std::initializer_list<type> arg_types) : id(id)
+	intrinsic(const char *name, unsigned int id, const reshadefx::type &ret_type, std::initializer_list<reshadefx::type> arg_types) : id(id)
 	{
 		function.name = name;
 		function.return_type = ret_type;
 		function.parameter_list.reserve(arg_types.size());
-		for (const type &arg_type : arg_types)
+		for (const reshadefx::type &arg_type : arg_types)
 			function.parameter_list.push_back({ arg_type, {}, {}, {} });
 	}
 
 	unsigned int id;
-	function_info function;
+	reshadefx::function_info function;
 };
 
 // Import intrinsic callback functions
@@ -41,10 +39,12 @@ enum {
 #define int2 { reshadefx::type::t_int, 2, 1 }
 #define int3 { reshadefx::type::t_int, 3, 1 }
 #define int4 { reshadefx::type::t_int, 4, 1 }
+#define inout_int { reshadefx::type::t_int, 1, 1, reshadefx::type::q_inout | reshadefx::type::q_groupshared }
 #define uint { reshadefx::type::t_uint, 1, 1 }
 #define uint2 { reshadefx::type::t_uint, 2, 1 }
 #define uint3 { reshadefx::type::t_uint, 3, 1 }
 #define uint4 { reshadefx::type::t_uint, 4, 1 }
+#define inout_uint { reshadefx::type::t_uint, 1, 1, reshadefx::type::q_inout | reshadefx::type::q_groupshared }
 #define float { reshadefx::type::t_float, 1, 1 }
 #define float2 { reshadefx::type::t_float, 2, 1 }
 #define float3 { reshadefx::type::t_float, 3, 1 }
@@ -57,6 +57,7 @@ enum {
 #define out_float3 { reshadefx::type::t_float, 3, 1, reshadefx::type::q_out }
 #define out_float4 { reshadefx::type::t_float, 4, 1, reshadefx::type::q_out }
 #define sampler { reshadefx::type::t_sampler }
+#define storage { reshadefx::type::t_storage }
 
 // Import intrinsic function definitions
 #define DEFINE_INTRINSIC(name, i, ret_type, ...) intrinsic(#name, name##i, ret_type, { __VA_ARGS__ }),
@@ -89,6 +90,7 @@ static const intrinsic s_intrinsics[] = {
 #undef out_float3
 #undef out_float4
 #undef sampler
+#undef storage
 
 #pragma endregion
 
@@ -264,11 +266,13 @@ static int compare_functions(const std::vector<reshadefx::expression> &arguments
 	bool function1_viable = true;
 	const auto function1_ranks = static_cast<unsigned int *>(alloca(num_arguments * sizeof(unsigned int)));
 	for (size_t i = 0; i < num_arguments; ++i)
+	{
 		if ((function1_ranks[i] = reshadefx::type::rank(arguments[i].type, function1->parameter_list[i].type)) == 0)
 		{
 			function1_viable = false;
 			break;
 		}
+	}
 
 	// Catch case where the second function does not exist
 	if (function2 == nullptr)
@@ -278,11 +282,13 @@ static int compare_functions(const std::vector<reshadefx::expression> &arguments
 	bool function2_viable = true;
 	const auto function2_ranks = static_cast<unsigned int *>(alloca(num_arguments * sizeof(unsigned int)));
 	for (size_t i = 0; i < num_arguments; ++i)
+	{
 		if ((function2_ranks[i] = reshadefx::type::rank(arguments[i].type, function2->parameter_list[i].type)) == 0)
 		{
 			function2_viable = false;
 			break;
 		}
+	}
 
 	// If one of the functions is not viable, then the other one automatically wins
 	if (!function1_viable || !function2_viable)

@@ -40,6 +40,8 @@ void reshade::runtime::init_ui()
 	_menu_key_data[2] = false;
 	_menu_key_data[3] = false;
 
+	_editor.set_readonly(true);
+	_viewer.set_readonly(true); // Viewer is always read-only
 	_variable_editor_height = 300;
 
 	_imgui_context = ImGui::CreateContext();
@@ -433,13 +435,15 @@ void reshade::runtime::build_font_atlas()
 	_imgui_font_atlas->unique_name = "ImGUI Font Atlas";
 	if (init_texture(*_imgui_font_atlas))
 		upload_texture(*_imgui_font_atlas, pixels);
+	else
+		_imgui_font_atlas.reset();
 }
 
 void reshade::runtime::draw_ui()
 {
 	assert(_is_initialized);
 
-	const bool show_splash = _show_splash && (is_loading() || !_reload_compile_queue.empty() || (_last_present_time - _last_reload_time) < std::chrono::seconds(5));
+	const bool show_splash = _show_splash && (is_loading() || !_reload_compile_queue.empty() || (_reload_count <= 1 && (_last_present_time - _last_reload_time) < std::chrono::seconds(5)));
 	// Do not show this message in the same frame the screenshot is taken (so that it won't show up on the UI screenshot)
 	const bool show_screenshot_message = (_show_screenshot_message || !_screenshot_save_success) && !_should_save_screenshot && (_last_present_time - _last_screenshot_time) < std::chrono::seconds(_screenshot_save_success ? 3 : 5);
 
@@ -453,6 +457,8 @@ void reshade::runtime::draw_ui()
 
 	if (_rebuild_font_atlas)
 		build_font_atlas();
+	if (_imgui_font_atlas == nullptr)
+		return; // Cannot render UI without font atlas
 
 	ImGui::SetCurrentContext(_imgui_context);
 	auto &imgui_io = _imgui_context->IO;
@@ -522,7 +528,7 @@ void reshade::runtime::draw_ui()
 		}
 		else
 		{
-			ImGui::TextUnformatted("ReShade " VERSION_STRING_FILE " by crosire");
+			ImGui::TextUnformatted("ReShade " VERSION_STRING_PRODUCT);
 
 			if (_needs_update)
 			{
@@ -571,7 +577,7 @@ void reshade::runtime::draw_ui()
 				ImGui::TextUnformatted("' to open the configuration menu.");
 			}
 
-			if (!_last_reload_successful)
+			if (!_last_shader_reload_successful)
 			{
 				ImGui::Spacing();
 				ImGui::TextColored(COLOR_RED,
@@ -713,7 +719,7 @@ void reshade::runtime::draw_ui()
 		}
 		if (_show_code_viewer)
 		{
-			if (ImGui::Begin("Viewing code###viewer", &_show_code_viewer))
+			if (ImGui::Begin("Viewing generated code###viewer", &_show_code_viewer))
 				draw_code_viewer();
 			ImGui::End();
 		}
@@ -821,23 +827,41 @@ void reshade::runtime::draw_ui_home()
 	if (!_effects_enabled)
 		ImGui::Text("Effects are disabled. Press '%s' to enable them again.", input::key_name(_effects_key_data).c_str());
 
-	if (!_last_reload_successful)
+	if (!_last_shader_reload_successful)
 	{
-		std::string error_message = "There were errors compiling the following shaders:";
+		std::string shader_list;
 		for (const effect &effect : _effects)
 			if (!effect.compile_sucess)
-				error_message += ' ' + effect.source_file.filename().u8string() + ',';
-		error_message.pop_back();
+				shader_list += ' ' + effect.source_file.filename().u8string() + ',';
 
 		// Make sure there are actually effects that failed to compile, since the last reload flag may not have been reset
-		if (error_message.size() > 50)
+		if (shader_list.empty())
 		{
-			ImGui::TextColored(COLOR_RED, "%s", error_message.c_str());
-			ImGui::Spacing();
+			_last_shader_reload_successful = true;
 		}
 		else
 		{
-			_last_reload_successful = true;
+			shader_list.pop_back();
+			ImGui::TextColored(COLOR_RED, "Some shaders failed to compile:%s", shader_list.c_str());
+			ImGui::Spacing();
+		}
+	}
+	if (!_last_texture_reload_successful)
+	{
+		std::string texture_list;
+		for (const texture &texture : _textures)
+			if (!texture.loaded && !texture.annotation_as_string("source").empty())
+				texture_list += ' ' + texture.unique_name + ',';
+
+		if (texture_list.empty())
+		{
+			_last_texture_reload_successful = true;
+		}
+		else
+		{
+			texture_list.pop_back();
+			ImGui::TextColored(COLOR_RED, "Some textures failed to load:%s", texture_list.c_str());
+			ImGui::Spacing();
 		}
 	}
 
@@ -1080,8 +1104,26 @@ void reshade::runtime::draw_ui_settings()
 		_ignore_shortcuts |= ImGui::IsItemActive();
 
 		modified |= imgui_directory_input_box("Screenshot Path", _screenshot_path, _file_selection_path);
-		modified |= ImGui::Combo("Screenshot Format", reinterpret_cast<int *>(&_screenshot_format), "Bitmap (*.bmp)\0Portable Network Graphics (*.png)\0");
-		modified |= ImGui::Checkbox("Clear alpha channel", &_screenshot_clear_alpha);
+
+		const int hour = _date[3] / 3600;
+		const int minute = (_date[3] - hour * 3600) / 60;
+		const int seconds = _date[3] - hour * 3600 - minute * 60;
+
+		char timestamp[21];
+		sprintf_s(timestamp, " %.4d-%.2d-%.2d %.2d-%.2d-%.2d", _date[0], _date[1], _date[2], hour, minute, seconds);
+
+		std::string screenshot_naming_items;
+		screenshot_naming_items += g_target_executable_path.stem().string() + timestamp + '\0';
+		screenshot_naming_items += g_target_executable_path.stem().string() + timestamp + ' ' + _current_preset_path.stem().string() + '\0';
+		modified |= ImGui::Combo("Screenshot Name", reinterpret_cast<int *>(&_screenshot_naming), screenshot_naming_items.c_str());
+
+		modified |= ImGui::Combo("Screenshot Format", reinterpret_cast<int *>(&_screenshot_format), "Bitmap (*.bmp)\0Portable Network Graphics (*.png)\0JPEG (*.jpeg)\0");
+
+		if (_screenshot_format == 2)
+			modified |= ImGui::SliderInt("JPEG Quality", reinterpret_cast<int *>(&_screenshot_jpeg_quality), 1, 100);
+		else
+			modified |= ImGui::Checkbox("Clear alpha channel", &_screenshot_clear_alpha);
+
 		modified |= ImGui::Checkbox("Include current preset", &_screenshot_include_preset);
 		modified |= ImGui::Checkbox("Save before and after images", &_screenshot_save_before);
 		modified |= ImGui::Checkbox("Save separate user interface image", &_screenshot_save_ui);
@@ -1353,7 +1395,7 @@ void reshade::runtime::draw_ui_statistics()
 				continue;
 
 			if (technique.average_cpu_duration != 0)
-				ImGui::Text("%*.3f ms CPU (%.0f%%)", cpu_digits + 4, technique.average_cpu_duration * 1e-6f, 100 * (technique.average_cpu_duration * 1e-6f) / (post_processing_time_cpu * 1e-6f));
+				ImGui::Text("%*.3f ms CPU", cpu_digits + 4, technique.average_cpu_duration * 1e-6f);
 			else
 				ImGui::NewLine();
 		}
@@ -1369,7 +1411,7 @@ void reshade::runtime::draw_ui_statistics()
 
 			// GPU timings are not available for all APIs
 			if (technique.average_gpu_duration != 0)
-				ImGui::Text("%*.3f ms GPU (%.0f%%)", gpu_digits + 4, technique.average_gpu_duration * 1e-6f, 100 * (technique.average_gpu_duration * 1e-6f) / (post_processing_time_gpu * 1e-6f));
+				ImGui::Text("%*.3f ms GPU", gpu_digits + 4, technique.average_gpu_duration * 1e-6f);
 			else
 				ImGui::NewLine();
 		}
@@ -1585,12 +1627,18 @@ void reshade::runtime::draw_ui_log()
 }
 void reshade::runtime::draw_ui_about()
 {
-	ImGui::TextUnformatted("ReShade " VERSION_STRING_FILE);
+	ImGui::TextUnformatted("ReShade " VERSION_STRING_PRODUCT);
+	ImGui::Separator();
 
 	ImGui::PushTextWrapPos();
-	ImGui::TextUnformatted(R"(Copyright (C) 2014 Patrick Mours. All rights reserved.
 
-https://github.com/crosire/reshade
+	ImGui::TextUnformatted("Developed and maintained by crosire.");
+	ImGui::TextUnformatted("Special thanks to CeeJay.dk and Marty McFly for their continued support!");
+	ImGui::TextUnformatted("This project makes use of several open source libraries, licenses of which are listed below:");
+
+	if (ImGui::CollapsingHeader("ReShade", ImGuiTreeNodeFlags_DefaultOpen))
+	{
+		ImGui::TextUnformatted(R"(Copyright (C) 2014 Patrick Mours. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
 
@@ -1599,7 +1647,7 @@ Redistribution and use in source and binary forms, with or without modification,
  3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
 
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.)");
-
+	}
 	if (ImGui::CollapsingHeader("MinHook"))
 	{
 		ImGui::TextUnformatted(R"(Copyright (C) 2009-2017 Tsuda Kageyu. All rights reserved.
@@ -1727,11 +1775,10 @@ void reshade::runtime::draw_code_editor()
 			_reload_remaining_effects = 1;
 			unload_effect(_selected_effect);
 			load_effect(_effects[_selected_effect].source_file, _selected_effect);
+			assert(_reload_remaining_effects == 0);
 
 			// Re-open current file so that errors are updated
 			open_file_in_code_editor(_selected_effect, _editor_file);
-
-			assert(_reload_remaining_effects == 0);
 
 			// Reloading an effect file invalidates all textures, but the statistics window may already have drawn references to those, so need to reset it
 			ImGui::FindWindowByName("Statistics")->DrawList->CmdBuffer.clear();
@@ -2443,7 +2490,7 @@ void reshade::runtime::draw_variable_editor()
 		{
 			save_current_preset();
 
-			const bool reload_successful_before = _last_reload_successful;
+			const bool reload_successful_before = _last_shader_reload_successful;
 
 			// Reload current effect file
 			_reload_total_effects = 1;
@@ -2460,7 +2507,7 @@ void reshade::runtime::draw_variable_editor()
 				unload_effect(effect_index);
 				if (load_effect(_effects[effect_index].source_file, effect_index))
 				{
-					_last_reload_successful = reload_successful_before;
+					_last_shader_reload_successful = reload_successful_before;
 					ImGui::OpenPopup("##pperror"); // Notify the user about this
 
 					// Update preset again now, so that the removed preprocessor definition does not reappear on a reload
@@ -2589,6 +2636,18 @@ void reshade::runtime::draw_technique_editor()
 
 			ImGui::Separator();
 
+			if (ImGui::Button("Open folder in explorer", ImVec2(button_width, 0)))
+			{
+				// Use absolute path to explorer to avoid potential security issues when executable is replaced
+				WCHAR explorer_path[260] = L"";
+				GetWindowsDirectoryW(explorer_path, ARRAYSIZE(explorer_path));
+				wcscat_s(explorer_path, L"\\explorer.exe");
+
+				ShellExecuteW(nullptr, L"open", explorer_path, (L"/select,\"" + effect.source_file.wstring() + L"\"").c_str(), nullptr, SW_SHOWDEFAULT);
+			}
+
+			ImGui::Separator();
+
 			if (imgui_popup_button("Edit source code", button_width))
 			{
 				std::filesystem::path source_file;
@@ -2599,9 +2658,13 @@ void reshade::runtime::draw_technique_editor()
 				{
 					ImGui::Separator();
 
-					for (const auto &included_file : effect.included_files)
+					for (const std::filesystem::path &included_file : effect.included_files)
+					{
 						if (ImGui::MenuItem(included_file.filename().u8string().c_str()))
+						{
 							source_file = included_file;
+						}
+					}
 				}
 
 				ImGui::EndPopup();
@@ -2618,40 +2681,34 @@ void reshade::runtime::draw_technique_editor()
 			{
 				std::string source_code;
 				if (ImGui::MenuItem("Generated code"))
+				{
 					source_code = effect.preamble + effect.module.hlsl;
+					_viewer_entry_point.clear();
+				}
 
 				if (!effect.assembly.empty())
 				{
 					ImGui::Separator();
 
 					for (const reshadefx::entry_point &entry_point : effect.module.entry_points)
+					{
 						if (const auto assembly_it = effect.assembly.find(entry_point.name);
 							assembly_it != effect.assembly.end() && ImGui::MenuItem(entry_point.name.c_str()))
+						{
 							source_code = assembly_it->second;
+							_viewer_entry_point = entry_point.name;
+						}
+					}
 				}
 
 				ImGui::EndPopup();
 
 				if (!source_code.empty())
 				{
-					_viewer.set_text(source_code);
-					_viewer.clear_errors();
-					_viewer.set_readonly(true);
 					_show_code_viewer = true;
+					_viewer.set_text(source_code);
 					ImGui::CloseCurrentPopup();
 				}
-			}
-
-			ImGui::Separator();
-
-			if (ImGui::Button("Open folder in explorer", ImVec2(button_width, 0)))
-			{
-				// Use absolute path to explorer to avoid potential security issues when executable is replaced
-				WCHAR explorer_path[260] = L"";
-				GetWindowsDirectoryW(explorer_path, ARRAYSIZE(explorer_path));
-				wcscat_s(explorer_path, L"\\explorer.exe");
-
-				ShellExecuteW(nullptr, L"open", explorer_path, (L"/select,\"" + effect.source_file.wstring() + L"\"").c_str(), nullptr, SW_SHOWDEFAULT);
 			}
 
 			ImGui::EndPopup();
@@ -2697,19 +2754,26 @@ void reshade::runtime::open_file_in_code_editor(size_t effect_index, const std::
 		return;
 	}
 
+	// Force code editor to become visible
+	_show_code_editor = true;
+
 	// Only reload text if another file is opened (to keep undo history intact)
 	if (path != _editor_file)
 	{
+		_editor_file = path;
+
 		// Load file to string and update editor text
 		_editor.set_text(std::string(std::istreambuf_iterator<char>(std::ifstream(path).rdbuf()), std::istreambuf_iterator<char>()));
 		_editor.set_readonly(false);
-		_editor_file = path;
 	}
 
-	_show_code_editor = true;
+	// Update generated code in viewer after a reload
+	if (_show_code_viewer && _viewer_entry_point.empty())
+	{
+		_viewer.set_text(_effects[effect_index].preamble + _effects[effect_index].module.hlsl);
+	}
 
 	_editor.clear_errors();
-
 	const std::string &errors = _effects[effect_index].errors;
 
 	for (size_t offset = 0, next; offset != std::string::npos; offset = next)

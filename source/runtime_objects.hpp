@@ -22,6 +22,7 @@ namespace reshade
 		mouse_point,
 		mouse_delta,
 		mouse_button,
+		mouse_wheel,
 		freepie,
 		overlay_open,
 		bufready_depth,
@@ -102,6 +103,7 @@ namespace reshade
 		size_t effect_index = std::numeric_limits<size_t>::max();
 		texture_reference impl_reference = texture_reference::none;
 		bool shared = false;
+		bool loaded = false;
 	};
 
 	struct uniform final : reshadefx::uniform_info
@@ -175,8 +177,7 @@ namespace reshade
 		size_t effect_index = std::numeric_limits<size_t>::max();
 		bool hidden = false;
 		bool enabled = false;
-		int32_t timeout = 0;
-		int64_t timeleft = 0;
+		int64_t time_left = 0;
 		uint32_t toggle_key_data[4] = {};
 		moving_average<uint64_t, 60> average_cpu_duration;
 		moving_average<uint64_t, 60> average_gpu_duration;

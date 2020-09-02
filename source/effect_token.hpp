@@ -15,9 +15,9 @@ namespace reshadefx
 	/// </summary>
 	struct location
 	{
-		location() : line(1), column(1) { }
-		explicit location(unsigned int line, unsigned int column = 1) : line(line), column(column) { }
-		explicit location(std::string source, unsigned int line, unsigned int column = 1) : source(std::move(source)), line(line), column(column) { }
+		location() : line(1), column(1) {}
+		explicit location(unsigned int line, unsigned int column = 1) : line(line), column(column) {}
+		explicit location(std::string source, unsigned int line, unsigned int column = 1) : source(std::move(source)), line(line), column(column) {}
 
 		std::string source;
 		unsigned int line, column;
@@ -121,6 +121,7 @@ namespace reshadefx
 		uniform_,
 		volatile_,
 		precise,
+		groupshared,
 		in,
 		out,
 		inout,
@@ -164,6 +165,7 @@ namespace reshadefx
 		string_,
 		texture,
 		sampler,
+		storage,
 
 		// preprocessor directives
 		hash_def,

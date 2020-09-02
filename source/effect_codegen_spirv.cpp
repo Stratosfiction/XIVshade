@@ -28,9 +28,9 @@ struct spirv_instruction
 	spv::Id result;
 	std::vector<spv::Id> operands;
 
-	explicit spirv_instruction(spv::Op op = spv::OpNop) : op(op), type(0), result(0) { }
-	spirv_instruction(spv::Op op, spv::Id result) : op(op), type(result), result(0) { }
-	spirv_instruction(spv::Op op, spv::Id type, spv::Id result) : op(op), type(type), result(result) { }
+	explicit spirv_instruction(spv::Op op = spv::OpNop) : op(op), type(0), result(0) {}
+	spirv_instruction(spv::Op op, spv::Id result) : op(op), type(result), result(0) {}
+	spirv_instruction(spv::Op op, spv::Id type, spv::Id result) : op(op), type(type), result(result) {}
 
 	/// <summary>
 	/// Add a single operand to the instruction.
@@ -72,7 +72,7 @@ struct spirv_instruction
 	/// <param name="output">The output stream to append this instruction to.</param>
 	void write(std::vector<uint32_t> &output) const
 	{
-		// See: https://www.khronos.org/registry/spir-v/specs/unified1/SPIRV.html
+		// See https://www.khronos.org/registry/spir-v/specs/unified1/SPIRV.html
 		// 0             | Opcode: The 16 high-order bits are the WordCount of the instruction. The 16 low-order bits are the opcode enumerant.
 		// 1             | Optional instruction type <id>
 		// .             | Optional instruction Result <id>
@@ -85,10 +85,12 @@ struct spirv_instruction
 		output.push_back((num_words << spv::WordCountShift) | op);
 
 		// Optional instruction type ID
-		if (type != 0) output.push_back(type);
+		if (type != 0)
+			output.push_back(type);
 
 		// Optional instruction result ID
-		if (result != 0) output.push_back(result);
+		if (result != 0)
+			output.push_back(result);
 
 		// Write out the operands
 		output.insert(output.end(), operands.begin(), operands.end());
@@ -188,12 +190,17 @@ private:
 		if (loc.source.empty() || !_debug_info)
 			return;
 
-		spv::Id file = _string_lookup[loc.source];
-		if (file == 0) {
-			file = add_instruction(spv::OpString, 0, _debug_a)
-				.add_string(loc.source.c_str())
-				.result;
-			_string_lookup[loc.source] = file;
+		spv::Id file;
+		if (const auto it = _string_lookup.find(loc.source);
+			it != _string_lookup.end())
+		{
+			file = it->second;
+		}
+		else
+		{
+			add_instruction(spv::OpString, _debug_a, file)
+				.add_string(loc.source.c_str());
+			_string_lookup.emplace(loc.source, file);
 		}
 
 		// https://www.khronos.org/registry/spir-v/specs/unified1/SPIRV.html#OpLine
@@ -214,6 +221,12 @@ private:
 		instruction.result = make_id();
 		return instruction;
 	}
+	inline spirv_instruction &add_instruction(spv::Op op, spirv_basic_block &block, spv::Id &result)
+	{
+		spirv_instruction &instruction = add_instruction_without_result(op, block);
+		instruction.result = result = make_id();
+		return instruction;
+	}
 	inline spirv_instruction &add_instruction_without_result(spv::Op op)
 	{
 		assert(is_in_function() && is_in_block());
@@ -229,11 +242,16 @@ private:
 		// First initialize the UBO type now that all member types are known
 		if (_global_ubo_type != 0)
 		{
-			add_instruction(spv::OpTypeStruct, 0, _types_and_constants)
-				.add(_global_ubo_types.begin(), _global_ubo_types.end())
-				.result = _global_ubo_type;
+			spirv_instruction &type_inst = add_instruction_without_result(spv::OpTypeStruct, _types_and_constants);
+			type_inst.add(_global_ubo_types.begin(), _global_ubo_types.end());
+			type_inst.result = _global_ubo_type;
 
-			define_variable(_global_ubo_variable, {}, { type::t_struct, 0, 0, type::q_uniform, 0, _global_ubo_type }, "$Globals", spv::StorageClassUniform);
+			spirv_instruction &variable_inst = add_instruction_without_result(spv::OpVariable, _variables);
+			variable_inst.add(spv::StorageClassUniform);
+			variable_inst.type = convert_type({ type::t_struct, 0, 0, type::q_uniform, 0, _global_ubo_type }, true, spv::StorageClassUniform);
+			variable_inst.result = _global_ubo_variable;
+
+			add_name(variable_inst.result, "$Globals");
 		}
 
 		module = std::move(_module);
@@ -326,7 +344,7 @@ private:
 		if (is_ptr == false)
 			storage = spv::StorageClassFunction;
 		// There cannot be function local sampler variables, so always assume uniform storage for them
-		if (info.is_texture() || info.is_sampler())
+		if (info.is_texture() || info.is_sampler() || info.is_storage())
 			storage = spv::StorageClassUniformConstant;
 
 		const type_lookup lookup = { info, is_ptr, array_stride, storage };
@@ -334,14 +352,14 @@ private:
 			[&lookup](const auto &lookup_it) { return lookup_it.first == lookup; }); it != _type_lookup.end())
 			return it->second;
 
-		spv::Id type;
-
+		spv::Id type, elem_type;
 		if (is_ptr)
 		{
-			type = convert_type(info, false, storage, array_stride);
-			type = add_instruction(spv::OpTypePointer, 0, _types_and_constants)
+			elem_type = convert_type(info, false, storage, array_stride);
+
+			add_instruction(spv::OpTypePointer, _types_and_constants, type)
 				.add(storage)
-				.add(type).result;
+				.add(elem_type);
 		}
 		else if (info.is_array())
 		{
@@ -351,12 +369,12 @@ private:
 			// Make sure we don't get any dynamic arrays here
 			assert(info.array_length > 0);
 
-			type = convert_type(elem_info, false, storage);
+			elem_type = convert_type(elem_info, false, storage);
 			const spv::Id array_length = emit_constant(info.array_length);
 
-			type = add_instruction(spv::OpTypeArray, 0, _types_and_constants)
-				.add(type)
-				.add(array_length).result;
+			add_instruction(spv::OpTypeArray, _types_and_constants, type)
+				.add(elem_type)
+				.add(array_length);
 
 			if (array_stride != 0)
 				add_decoration(type, spv::DecorationArrayStride, { array_stride });
@@ -368,15 +386,15 @@ private:
 			elem_info.rows = info.cols;
 			elem_info.cols = 1;
 
-			type = convert_type(elem_info, false, storage);
+			elem_type = convert_type(elem_info, false, storage);
 
 			// Matrix types with just one row are interpreted as if they were a vector type
 			if (info.rows == 1)
-				return type;
+				return elem_type;
 
-			type = add_instruction(spv::OpTypeMatrix, 0, _types_and_constants)
-				.add(type)
-				.add(info.rows).result;
+			add_instruction(spv::OpTypeMatrix, _types_and_constants, type)
+				.add(elem_type)
+				.add(info.rows);
 		}
 		else if (info.is_vector())
 		{
@@ -384,10 +402,11 @@ private:
 			elem_info.rows = 1;
 			elem_info.cols = 1;
 
-			type = convert_type(elem_info, false, storage);
-			type = add_instruction(spv::OpTypeVector, 0, _types_and_constants)
-				.add(type)
-				.add(info.rows).result;
+			elem_type = convert_type(elem_info, false, storage);
+
+			add_instruction(spv::OpTypeVector, _types_and_constants, type)
+				.add(elem_type)
+				.add(info.rows);
 		}
 		else
 		{
@@ -395,44 +414,54 @@ private:
 			{
 			case type::t_void:
 				assert(info.rows == 0 && info.cols == 0);
-				type = add_instruction(spv::OpTypeVoid, 0, _types_and_constants).result;
+				add_instruction(spv::OpTypeVoid, _types_and_constants, type);
 				break;
 			case type::t_bool:
 				assert(info.rows == 1 && info.cols == 1);
-				type = add_instruction(spv::OpTypeBool, 0, _types_and_constants).result;
+				add_instruction(spv::OpTypeBool, _types_and_constants, type);
 				break;
 			case type::t_int:
 				assert(info.rows == 1 && info.cols == 1);
-				type = add_instruction(spv::OpTypeInt, 0, _types_and_constants).add(32).add(1).result;
+				add_instruction(spv::OpTypeInt, _types_and_constants, type)
+					.add(32) // Width
+					.add(1); // Signedness
 				break;
 			case type::t_uint:
 				assert(info.rows == 1 && info.cols == 1);
-				type = add_instruction(spv::OpTypeInt, 0, _types_and_constants).add(32).add(0).result;
+				add_instruction(spv::OpTypeInt, _types_and_constants, type)
+					.add(32) // Width
+					.add(0); // Signedness
 				break;
 			case type::t_float:
 				assert(info.rows == 1 && info.cols == 1);
-				type = add_instruction( spv::OpTypeFloat, 0, _types_and_constants).add(32).result;
+				add_instruction(spv::OpTypeFloat, _types_and_constants, type)
+					.add(32); // Width
 				break;
 			case type::t_struct:
 				assert(info.rows == 0 && info.cols == 0 && info.definition != 0);
 				type = info.definition;
 				break;
+			case type::t_sampler:
+				assert(info.rows == 0 && info.cols == 0);
+				elem_type = convert_type({ type::t_texture, 0, 0, type::q_uniform });
+				add_instruction(spv::OpTypeSampledImage, _types_and_constants, type)
+					.add(elem_type);
+				break;
+			case type::t_storage:
+				// No format specified for the storage image
+				add_capability(spv::CapabilityStorageImageWriteWithoutFormat);
 			case type::t_texture:
 				assert(info.rows == 0 && info.cols == 0);
-				type = convert_type({ type::t_float, 1, 1 });
-				type = add_instruction(spv::OpTypeImage, 0, _types_and_constants)
-					.add(type) // Sampled Type
+				elem_type = convert_type({ type::t_float, 1, 1 });
+				add_instruction(spv::OpTypeImage, _types_and_constants, type)
+					.add(elem_type) // Sampled Type
 					.add(spv::Dim2D)
 					.add(0) // Not a depth image
 					.add(0) // Not an array
 					.add(0) // Not multi-sampled
-					.add(1) // Will be used with a sampler
-					.add(spv::ImageFormatUnknown).result;
-				break;
-			case type::t_sampler:
-				assert(info.rows == 0 && info.cols == 0);
-				type = convert_type({ type::t_texture, 0, 0, type::q_uniform });
-				type = add_instruction(spv::OpTypeSampledImage, 0, _types_and_constants).add(type).result;
+					.add(info.is_texture() ? 1 : 2) // Used with a sampler or as storage
+					.add(spv::ImageFormatUnknown)
+					.result;
 				break;
 			default:
 				return assert(false), 0;
@@ -464,6 +493,28 @@ private:
 		_function_type_lookup.push_back({ info, inst.result });;
 
 		return inst.result;
+	}
+
+	bool semantic_to_builtin(const std::string &semantic, spv::BuiltIn &builtin, shader_type stype)
+	{
+		builtin = spv::BuiltInMax;
+		if (semantic == "SV_POSITION")
+			builtin = stype == shader_type::ps ? spv::BuiltInFragCoord : spv::BuiltInPosition;
+		else if (semantic == "SV_DEPTH")
+			builtin = spv::BuiltInFragDepth;
+		else if (semantic == "SV_VERTEXID")
+			builtin = _vulkan_semantics ? spv::BuiltInVertexIndex : spv::BuiltInVertexId;
+		else if (semantic == "SV_ISFRONTFACE")
+			builtin = spv::BuiltInFrontFacing;
+		else if (semantic == "SV_GROUPID")
+			builtin = spv::BuiltInWorkgroupId;
+		else if (semantic == "SV_GROUPINDEX")
+			builtin = spv::BuiltInLocalInvocationIndex;
+		else if (semantic == "SV_GROUPTHREADID")
+			builtin = spv::BuiltInLocalInvocationId;
+		else if (semantic == "SV_DISPATCHTHREADID")
+			builtin = spv::BuiltInGlobalInvocationId;
+		return builtin != spv::BuiltInMax;
 	}
 
 	inline void add_name(id id, const char *name)
@@ -552,7 +603,8 @@ private:
 	}
 	id   define_texture(const location &, texture_info &info) override
 	{
-		info.id = make_id();
+		info.id = make_id(); // Need to create an unique ID here too, so that the symbol lookup for textures works
+		info.binding = ~0u;
 
 		_module.textures.push_back(info);
 
@@ -560,16 +612,26 @@ private:
 	}
 	id   define_sampler(const location &loc, sampler_info &info) override
 	{
-		info.id = make_id();
+		info.id = define_variable(loc, { type::t_sampler, 0, 0, type::q_extern | type::q_uniform }, info.unique_name.c_str(), spv::StorageClassUniformConstant);
 		info.binding = _module.num_sampler_bindings++;
+		info.texture_binding = ~0u;
 
-		define_variable(info.id, loc, { type::t_sampler, 0, 0, type::q_extern | type::q_uniform },
-			info.unique_name.c_str(), spv::StorageClassUniformConstant);
-
-		add_decoration(info.id, spv::DecorationDescriptorSet, { 1 });
 		add_decoration(info.id, spv::DecorationBinding, { info.binding });
+		add_decoration(info.id, spv::DecorationDescriptorSet, { 1 });
 
 		_module.samplers.push_back(info);
+
+		return info.id;
+	}
+	id   define_storage(const location &loc, storage_info &info) override
+	{
+		info.id = define_variable(loc, { type::t_storage, 0, 0, type::q_extern | type::q_uniform }, info.unique_name.c_str(), spv::StorageClassUniformConstant);
+		info.binding = _module.num_storage_bindings++;
+
+		add_decoration(info.id, spv::DecorationBinding, { info.binding });
+		add_decoration(info.id, spv::DecorationDescriptorSet, { 2 });
+
+		_module.storages.push_back(info);
 
 		return info.id;
 	}
@@ -613,8 +675,8 @@ private:
 				// Add each individual scalar component of the constant as a separate external specialization constant
 				for (size_t i = 0; i < (info.type.is_array() ? base_inst.operands.size() : 1); ++i)
 				{
+					constant initializer_value = info.initializer_value;
 					spirv_instruction elem_inst = base_inst;
-					reshadefx::constant initializer_value = info.initializer_value;
 
 					if (info.type.is_array())
 					{
@@ -718,21 +780,28 @@ private:
 	}
 	id   define_variable(const location &loc, const type &type, std::string name, bool global, id initializer_value) override
 	{
-		id res = make_id();
-		define_variable(res, loc, type, name.c_str(), global ? spv::StorageClassPrivate : spv::StorageClassFunction, initializer_value);
-		return res;
+		spv::StorageClass storage = spv::StorageClassFunction;
+		if (type.has(type::q_groupshared))
+			storage = spv::StorageClassWorkgroup;
+		else if (global)
+			storage = spv::StorageClassPrivate;
+
+		return define_variable(loc, type, name.c_str(), storage, initializer_value);
 	}
-	void define_variable(id id, const location &loc, const type &type, const char *name, spv::StorageClass storage, spv::Id initializer_value = 0)
+	id   define_variable(const location &loc, const type &type, const char *name, spv::StorageClass storage, spv::Id initializer_value = 0)
 	{
+		assert(storage != spv::StorageClassFunction || _current_function != nullptr);
+
 		spirv_basic_block &block = (storage != spv::StorageClassFunction) ?
 			_variables : _current_function->variables;
 
 		add_location(loc, block);
 
 		// https://www.khronos.org/registry/spir-v/specs/unified1/SPIRV.html#OpVariable
-		spirv_instruction &inst = add_instruction_without_result(spv::OpVariable, block);
+		spv::Id res;
+		spirv_instruction &inst = add_instruction(spv::OpVariable, block, res);
 		inst.type = convert_type(type, true, storage);
-		inst.result = id;
+
 		inst.add(storage);
 
 		if (initializer_value != 0)
@@ -746,15 +815,17 @@ private:
 			{
 				// Only use the variable initializer on global variables, since local variables for e.g. "for" statements need to be assigned in their respective scope and not their declaration
 				expression variable;
-				variable.reset_to_lvalue(loc, id, type);
+				variable.reset_to_lvalue(loc, res, type);
 				emit_store(variable, initializer_value);
 			}
 		}
 
 		if (name != nullptr && *name != '\0')
-			add_name(id, name);
+			add_name(res, name);
 
-		_storage_lookup[id] = storage;
+		_storage_lookup[res] = storage;
+
+		return res;
 	}
 	id   define_function(const location &loc, function_info &info) override
 	{
@@ -791,16 +862,20 @@ private:
 		return info.definition;
 	}
 
-	void define_entry_point(const function_info &func, bool is_ps) override
+	void define_entry_point(function_info &func, shader_type stype, int num_threads[2]) override
 	{
+		// Modify entry point name so each thread configuration is made separate
+		if (stype == shader_type::cs)
+			func.unique_name = 'E' + func.unique_name + '_' + std::to_string(num_threads[0]) + '_' + std::to_string(num_threads[1]);
+
 		if (const auto it = std::find_if(_module.entry_points.begin(), _module.entry_points.end(),
 			[&func](const auto &ep) { return ep.name == func.unique_name; }); it != _module.entry_points.end())
 			return;
 
-		_module.entry_points.push_back({ func.unique_name, is_ps });
+		_module.entry_points.push_back({ func.unique_name, stype });
 
-		id position_variable = 0;
-		std::vector<uint32_t> inputs_and_outputs;
+		spv::Id position_variable = 0;
+		std::vector<spv::Id> inputs_and_outputs;
 		std::vector<expression> call_params;
 
 		// Generate the glue entry point function
@@ -810,28 +885,14 @@ private:
 		define_function({}, entry_point);
 		enter_block(create_block());
 
-		const auto semantic_to_builtin = [this, is_ps](const std::string &semantic, spv::BuiltIn &builtin) {
-			builtin = spv::BuiltInMax;
-			if (semantic == "SV_POSITION" || semantic == "POSITION" || semantic == "VPOS")
-				builtin = is_ps ? spv::BuiltInFragCoord : spv::BuiltInPosition;
-			if (semantic == "SV_DEPTH" || semantic == "DEPTH")
-				builtin = spv::BuiltInFragDepth;
-			if (semantic == "SV_VERTEXID")
-				builtin = _vulkan_semantics ? spv::BuiltInVertexIndex : spv::BuiltInVertexId;
-			return builtin != spv::BuiltInMax;
-		};
-
 		const auto create_varying_param = [this, &call_params](const struct_member_info &param) {
-			const auto local_variable = make_id();
-			define_variable(local_variable, {}, param.type, nullptr, spv::StorageClassFunction);
+			const spv::Id local_variable = define_variable({}, param.type, nullptr, spv::StorageClassFunction);
 			call_params.emplace_back().reset_to_lvalue({}, local_variable, param.type);
 			return local_variable;
 		};
-		const auto create_varying_variable = [this, &inputs_and_outputs, &semantic_to_builtin, &position_variable](const type &param_type, std::string semantic, spv::StorageClass storage) {
-			const auto attrib_variable = make_id();
-			define_variable(attrib_variable, {}, param_type, nullptr, storage);
-
-			if (spv::BuiltIn builtin; semantic_to_builtin(semantic, builtin))
+		const auto create_varying_variable = [this, &inputs_and_outputs, &position_variable, stype](const type &param_type, std::string semantic, spv::StorageClass storage) {
+			const spv::Id attrib_variable = define_variable({}, param_type, nullptr, storage);
+			if (spv::BuiltIn builtin; semantic_to_builtin(semantic, builtin, stype))
 			{
 				add_builtin(attrib_variable, builtin);
 
@@ -840,8 +901,12 @@ private:
 			}
 			else
 			{
-				if (const char c = semantic.back(); c < '0' || c > '9')
-					semantic += '0'; // Always numerate semantics, so that e.g. TEXCOORD and TEXCOORD0 point to the same location
+				assert(stype != shader_type::cs);
+
+				// Always numerate semantics, so that e.g. TEXCOORD and TEXCOORD0 point to the same location
+				if (!semantic.empty())
+					if (const char c = semantic.back(); c < '0' || c > '9')
+						semantic += '0';
 
 				uint32_t location = 0;
 				if (semantic.compare(0, 9, "SV_TARGET") == 0)
@@ -876,25 +941,31 @@ private:
 
 				// Flatten structure parameters
 				if (param.type.is_struct())
+				{
 					for (const struct_member_info &member : find_struct(param.type.definition).member_list)
+					{
 						create_varying_variable(member.type, member.semantic, spv::StorageClassOutput);
+					}
+				}
 				else
+				{
 					create_varying_variable(param.type, param.semantic, spv::StorageClassOutput);
+				}
 			}
 			else
 			{
-				uint32_t param_value, param_var = create_varying_param(param);
+				spv::Id param_value, param_var = create_varying_param(param), input_var;
 
 				if (param.type.is_struct())
 				{
-					std::vector<uint32_t> elements;
-
+					std::vector<spv::Id> elements;
 					for (const struct_member_info &member : find_struct(param.type.definition).member_list)
 					{
-						const auto input = create_varying_variable(member.type, member.semantic, spv::StorageClassInput);
-						const auto value = add_instruction(spv::OpLoad, convert_type(member.type))
-							.add(input).result;
-						elements.push_back(value);
+						input_var = create_varying_variable(member.type, member.semantic, spv::StorageClassInput);
+
+						param_value = add_instruction(spv::OpLoad, convert_type(member.type))
+							.add(input_var).result;
+						elements.push_back(param_value);
 					}
 
 					param_value = add_instruction(spv::OpCompositeConstruct, convert_type(param.type))
@@ -902,10 +973,10 @@ private:
 				}
 				else
 				{
-					const auto input = create_varying_variable(param.type, param.semantic, spv::StorageClassInput);
+					input_var = create_varying_variable(param.type, param.semantic, spv::StorageClassInput);
 
 					param_value = add_instruction(spv::OpLoad, convert_type(param.type))
-						.add(input).result;
+						.add(input_var).result;
 				}
 
 				add_instruction_without_result(spv::OpStore)
@@ -922,7 +993,7 @@ private:
 
 			if (param.type.has(type::q_out))
 			{
-				const auto value = add_instruction(spv::OpLoad, convert_type(param.type))
+				const spv::Id value = add_instruction(spv::OpLoad, convert_type(param.type))
 					.add(call_params[i].base).result;
 
 				if (param.type.is_struct())
@@ -931,7 +1002,9 @@ private:
 
 					for (uint32_t member_index = 0; member_index < definition.member_list.size(); ++member_index)
 					{
-						auto member_value = add_instruction(spv::OpCompositeExtract, convert_type(definition.member_list[member_index].type))
+						const struct_member_info &member = definition.member_list[member_index];
+
+						const spv::Id member_value = add_instruction(spv::OpCompositeExtract, convert_type(member.type))
 							.add(value)
 							.add(member_index).result;
 
@@ -969,8 +1042,8 @@ private:
 			{
 				const struct_member_info &member = definition.member_list[member_index];
 
-				const auto result = create_varying_variable(member.type, member.semantic, spv::StorageClassOutput);
-				const auto member_result = add_instruction(spv::OpCompositeExtract, convert_type(member.type))
+				const spv::Id result = create_varying_variable(member.type, member.semantic, spv::StorageClassOutput);
+				const spv::Id member_result = add_instruction(spv::OpCompositeExtract, convert_type(member.type))
 					.add(call_result)
 					.add(member_index).result;
 
@@ -981,7 +1054,7 @@ private:
 		}
 		else if (!func.return_type.is_void())
 		{
-			const auto result = create_varying_variable(func.return_type, func.return_semantic, spv::StorageClassOutput);
+			const spv::Id result = create_varying_variable(func.return_type, func.return_semantic, spv::StorageClassOutput);
 
 			add_instruction_without_result(spv::OpStore)
 				.add(result)
@@ -989,7 +1062,7 @@ private:
 		}
 
 		// Add code to flip the output vertically
-		if (_invert_y && position_variable && !is_ps)
+		if (_invert_y && position_variable && stype == shader_type::vs)
 		{
 			expression position;
 			position.reset_to_lvalue({}, position_variable, { type::t_float, 4, 1 });
@@ -1004,17 +1077,38 @@ private:
 		leave_block_and_return(0);
 		leave_function();
 
-		assert(!func.unique_name.empty());
-		add_instruction_without_result(spv::OpEntryPoint, _entries)
-			.add(is_ps ? spv::ExecutionModelFragment : spv::ExecutionModelVertex)
-			.add(entry_point.definition)
-			.add_string(func.unique_name.c_str())
-			.add(inputs_and_outputs.begin(), inputs_and_outputs.end());
-
-		if (is_ps)
+		spv::ExecutionModel model;
+		switch (stype)
+		{
+		case shader_type::vs:
+			model = spv::ExecutionModelVertex;
+			break;
+		case shader_type::ps:
+			model = spv::ExecutionModelFragment;
 			add_instruction_without_result(spv::OpExecutionMode, _execution_modes)
 				.add(entry_point.definition)
 				.add(spv::ExecutionModeOriginUpperLeft);
+			break;
+		case shader_type::cs:
+			model = spv::ExecutionModelGLCompute;
+			add_instruction_without_result(spv::OpExecutionMode, _execution_modes)
+				.add(entry_point.definition)
+				.add(spv::ExecutionModeLocalSize)
+				.add(num_threads[0])
+				.add(num_threads[1])
+				.add(1u);
+			break;
+		default:
+			assert(false);
+			return;
+		}
+
+		assert(!func.unique_name.empty());
+		add_instruction_without_result(spv::OpEntryPoint, _entries)
+			.add(model)
+			.add(entry_point.definition)
+			.add_string(func.unique_name.c_str())
+			.add(inputs_and_outputs.begin(), inputs_and_outputs.end());
 	}
 
 	id   emit_load(const expression &exp, bool) override
@@ -1024,7 +1118,6 @@ private:
 
 		size_t i = 0;
 		spv::Id result = exp.base;
-
 		auto base_type = exp.type;
 		bool is_uniform_bool = false;
 
@@ -1077,17 +1170,16 @@ private:
 				if (exp.chain[0].from.rows == 1 && exp.chain[0].from.cols > 1)
 					i = 1;
 
-				do {
+				for (; i < exp.chain.size() && (
+					exp.chain[i].op == expression::operation::op_member ||
+					exp.chain[i].op == expression::operation::op_dynamic_index ||
+					exp.chain[i].op == expression::operation::op_constant_index); ++i)
 					access_chain->add(exp.chain[i].op == expression::operation::op_dynamic_index ?
 						exp.chain[i].index :
 						emit_constant(exp.chain[i].index)); // Indexes
-					base_type = exp.chain[i++].to;
-				} while (i < exp.chain.size() && (
-					exp.chain[i].op == expression::operation::op_member ||
-					exp.chain[i].op == expression::operation::op_dynamic_index ||
-					exp.chain[i].op == expression::operation::op_constant_index));
 
-				access_chain->type = convert_type(exp.chain[i - 1].to, true, storage); // Last type is the result
+				base_type = exp.chain[i - 1].to;
+				access_chain->type = convert_type(base_type, true, storage); // Last type is the result
 				result = access_chain->result;
 			}
 			else if (access_chain != nullptr)
@@ -1115,6 +1207,7 @@ private:
 		// Work through all remaining operations in the access chain and apply them to the value
 		for (; i < exp.chain.size(); ++i)
 		{
+			assert(result != 0);
 			const auto &op = exp.chain[i];
 
 			switch (op.op)
@@ -1141,7 +1234,6 @@ private:
 				else
 				{
 					spv::Op spv_op = spv::OpNop;
-
 					switch (op.to.base)
 					{
 					case type::t_int:
@@ -1164,13 +1256,10 @@ private:
 						.result;
 				}
 				break;
-			case expression::operation::op_member:
-				// These should have been handled above already
-				break;
 			case expression::operation::op_dynamic_index:
 				if (op.from.is_vector())
 				{
-					assert(result != 0 && op.to.is_scalar());
+					assert(op.to.is_scalar());
 					result = add_instruction(spv::OpVectorExtractDynamic, convert_type(op.to))
 						.add(result) // Vector
 						.add(op.index) // Index
@@ -1179,9 +1268,9 @@ private:
 				}
 				assert(false);
 				break;
+			case expression::operation::op_member: // In case of struct return values, which are r-values
 			case expression::operation::op_constant_index:
-				assert(result != 0);
-				assert(op.from.is_vector() || op.from.is_matrix());
+				assert(op.from.is_vector() || op.from.is_matrix() || op.from.is_struct());
 				result = add_instruction(spv::OpCompositeExtract, convert_type(op.to))
 					.add(result)
 					.add(op.index) // Literal Index
@@ -1193,7 +1282,6 @@ private:
 					if (op.from.is_matrix())
 					{
 						spv::Id components[4];
-
 						for (unsigned int c = 0; c < 4 && op.swizzle[c] >= 0; ++c)
 						{
 							const unsigned int row = op.swizzle[c] / 4;
@@ -1203,7 +1291,6 @@ private:
 							scalar_type.rows = 1;
 							scalar_type.cols = 1;
 
-							assert(result != 0);
 							spirv_instruction &node = add_instruction(spv::OpCompositeExtract, convert_type(scalar_type))
 								.add(result);
 
@@ -1216,10 +1303,8 @@ private:
 						}
 
 						spirv_instruction &node = add_instruction(spv::OpCompositeConstruct, convert_type(op.to));
-
 						for (unsigned int c = 0; c < 4 && op.swizzle[c] >= 0; ++c)
 							node.add(components[c]);
-
 						result = node.result;
 						break;
 					}
@@ -1228,30 +1313,26 @@ private:
 						spirv_instruction &node = add_instruction(spv::OpVectorShuffle, convert_type(op.to))
 							.add(result) // Vector 1
 							.add(result); // Vector 2
-
 						for (unsigned int c = 0; c < 4 && op.swizzle[c] >= 0; ++c)
 							node.add(op.swizzle[c]);
-
 						result = node.result;
 						break;
 					}
 					else
 					{
 						spirv_instruction &node = add_instruction(spv::OpCompositeConstruct, convert_type(op.to));
-
 						for (unsigned int c = 0; c < op.to.rows; ++c)
 							node.add(result);
-
 						result = node.result;
 						break;
 					}
 				}
 				else if (op.from.is_matrix() && op.to.is_scalar())
 				{
-					assert(result != 0 && op.swizzle[1] < 0);
+					assert(op.swizzle[1] < 0);
+
 					spirv_instruction &node = add_instruction(spv::OpCompositeExtract, convert_type(op.to))
 						.add(result); // Composite
-
 					if (op.from.rows > 1)
 					{
 						const unsigned int row = op.swizzle[0] / 4;
@@ -1263,7 +1344,6 @@ private:
 					{
 						node.add(op.swizzle[0]);
 					}
-
 					result = node.result; // Result ID
 					break;
 				}
@@ -1281,50 +1361,15 @@ private:
 		add_location(exp.location, *_current_block_data);
 
 		size_t i = 0;
-		spv::Id target = exp.base;
-
-		auto base_type = exp.chain.empty() ? exp.type : exp.chain[0].from;
-
 		// Any indexing expressions can be resolved with an 'OpAccessChain' already
-		if (!exp.chain.empty() && (
-			exp.chain[0].op == expression::operation::op_member ||
-			exp.chain[0].op == expression::operation::op_dynamic_index ||
-			exp.chain[0].op == expression::operation::op_constant_index))
-		{
-			spv::StorageClass storage = spv::StorageClassFunction;
-			if (const auto it = _storage_lookup.find(exp.base);
-				it != _storage_lookup.end())
-				storage = it->second;
-
-			// Ensure that 'access_chain' cannot get invalidated by calls to 'emit_constant' or 'convert_type'
-			assert(_current_block_data != &_types_and_constants);
-
-			spirv_instruction *access_chain = &add_instruction(spv::OpAccessChain).add(target); // Base
-
-			// Ignore first index into 1xN matrices, since they were translated to a vector type in SPIR-V
-			if (exp.chain[0].from.rows == 1 && exp.chain[0].from.cols > 1)
-				i = 1;
-
-			do {
-				access_chain->add(exp.chain[i].op == expression::operation::op_dynamic_index ?
-					exp.chain[i].index :
-					emit_constant(exp.chain[i].index)); // Indexes
-				base_type = exp.chain[i++].to;
-			} while (i < exp.chain.size() && (
-				exp.chain[i].op == expression::operation::op_member ||
-				exp.chain[i].op == expression::operation::op_dynamic_index ||
-				exp.chain[i].op == expression::operation::op_constant_index));
-
-			access_chain->type = convert_type(exp.chain[i - 1].to, true, storage); // Last type is the result
-			target = access_chain->result;
-		}
+		spv::Id target = emit_access_chain(exp, i);
+		auto base_type = exp.chain.empty() ? exp.type : i == 0 ? exp.chain[0].from : exp.chain[i - 1].to;
 
 		// TODO: Complex access chains like float4x4[0].m00m10[0] = 0;
 		// Work through all remaining operations in the access chain and apply them to the value
 		for (; i < exp.chain.size(); ++i)
 		{
 			const auto &op = exp.chain[i];
-
 			switch (op.op)
 			{
 				case expression::operation::op_cast:
@@ -1380,6 +1425,7 @@ private:
 					}
 					else
 					{
+						// TODO: Implement matrix to vector swizzles
 						assert(false);
 					}
 					break;
@@ -1391,6 +1437,44 @@ private:
 			.add(target)
 			.add(value);
 	}
+	id   emit_access_chain(const expression &exp, size_t &i) override
+	{
+		// This function cannot create access chains for uniform variables
+		assert((exp.base & 0xF0000000) == 0);
+
+		i = 0;
+		if (exp.chain.empty() || (
+			exp.chain[0].op != expression::operation::op_member &&
+			exp.chain[0].op != expression::operation::op_dynamic_index &&
+			exp.chain[0].op != expression::operation::op_constant_index))
+			return exp.base;
+
+		spv::StorageClass storage = spv::StorageClassFunction;
+		if (const auto it = _storage_lookup.find(exp.base);
+			it != _storage_lookup.end())
+			storage = it->second;
+
+		// Ensure that 'access_chain' cannot get invalidated by calls to 'emit_constant' or 'convert_type'
+		assert(_current_block_data != &_types_and_constants);
+
+		spirv_instruction *access_chain =
+			&add_instruction(spv::OpAccessChain).add(exp.base); // Base
+
+		// Ignore first index into 1xN matrices, since they were translated to a vector type in SPIR-V
+		if (exp.chain[0].from.rows == 1 && exp.chain[0].from.cols > 1)
+			i = 1;
+
+		for (; i < exp.chain.size() && (
+			exp.chain[i].op == expression::operation::op_member ||
+			exp.chain[i].op == expression::operation::op_dynamic_index ||
+			exp.chain[i].op == expression::operation::op_constant_index); ++i)
+			access_chain->add(exp.chain[i].op == expression::operation::op_dynamic_index ?
+				exp.chain[i].index :
+				emit_constant(exp.chain[i].index)); // Indexes
+
+		access_chain->type = convert_type(exp.chain[i - 1].to, true, storage); // Last type is the result
+		return access_chain->result;
+	}
 
 	id   emit_constant(uint32_t value)
 	{
@@ -1399,7 +1483,7 @@ private:
 	id   emit_constant(const type &type, uint32_t value)
 	{
 		// Create a constant value of the specified type
-		constant data;
+		constant data = {}; // Initialize to zero, so that components not set below still have a defined value for the lookup via std::memcmp
 		for (unsigned int i = 0; i < type.components(); ++i)
 			if (type.is_integral())
 				data.as_uint[i] = value;
@@ -1423,10 +1507,9 @@ private:
 						return false;
 				return true;
 			}); it != _constant_lookup.end())
-				return std::get<2>(*it);
+				return std::get<2>(*it); // Re-use existing constant instead of duplicating the definition
 
-		spv::Id result = 0;
-
+		spv::Id result;
 		if (type.is_array())
 		{
 			assert(type.array_length > 0); // Unsized arrays cannot be constants
@@ -1481,7 +1564,6 @@ private:
 			else
 			{
 				spirv_instruction &node = add_instruction(spec_constant ? spv::OpSpecConstantComposite : spv::OpConstantComposite, convert_type(type), _types_and_constants);
-
 				for (unsigned int i = 0; i < type.rows; ++i)
 					node.add(rows[i]);
 
@@ -1648,16 +1730,15 @@ private:
 	id   emit_call(const location &loc, id function, const type &res_type, const std::vector<expression> &args) override
 	{
 #ifndef NDEBUG
-		for (const auto &arg : args)
+		for (const expression &arg : args)
 			assert(arg.chain.empty() && arg.base != 0);
 #endif
-
 		add_location(loc, *_current_block_data);
 
 		// https://www.khronos.org/registry/spir-v/specs/unified1/SPIRV.html#OpFunctionCall
 		spirv_instruction &inst = add_instruction(spv::OpFunctionCall, convert_type(res_type));
 		inst.add(function); // Function
-		for (const auto &arg : args)
+		for (const expression &arg : args)
 			inst.add(arg.base); // Arguments
 
 		return inst.result;
@@ -1665,10 +1746,9 @@ private:
 	id   emit_call_intrinsic(const location &loc, id intrinsic, const type &res_type, const std::vector<expression> &args) override
 	{
 #ifndef NDEBUG
-		for (const auto &arg : args)
+		for (const expression &arg : args)
 			assert(arg.chain.empty() && arg.base != 0);
 #endif
-
 		add_location(loc, *_current_block_data);
 
 		enum
@@ -1688,10 +1768,9 @@ private:
 	id   emit_construct(const location &loc, const type &type, const std::vector<expression> &args) override
 	{
 #ifndef NDEBUG
-		for (const auto &arg : args)
+		for (const expression &arg : args)
 			assert((arg.type.is_scalar() || type.is_array()) && arg.chain.empty() && arg.base != 0);
 #endif
-
 		add_location(loc, *_current_block_data);
 
 		std::vector<spv::Id> ids;
@@ -1709,7 +1788,7 @@ private:
 			for (size_t arg = 0; arg < args.size(); arg += type.rows)
 			{
 				spirv_instruction &inst = add_instruction(spv::OpCompositeConstruct, convert_type(vector_type));
-				for (size_t row = 0; row < type.rows; ++row)
+				for (unsigned row = 0; row < type.rows; ++row)
 					inst.add(args[arg + row].base);
 
 				ids.push_back(inst.result);
@@ -1777,12 +1856,13 @@ private:
 		add_location(loc, *_current_block_data);
 
 		// https://www.khronos.org/registry/spir-v/specs/unified1/SPIRV.html#OpPhi
-		return add_instruction(spv::OpPhi, convert_type(type))
+		spirv_instruction &inst = add_instruction(spv::OpPhi, convert_type(type))
 			.add(true_value) // Variable 0
 			.add(true_statement_block) // Parent 0
 			.add(false_value) // Variable 1
-			.add(false_statement_block) // Parent 1
-			.result;
+			.add(false_statement_block); // Parent 1
+
+		return inst.result;
 	}
 	void emit_loop(const location &loc, id, id prev_block, id header_block, id condition_block, id loop_block, id continue_block, unsigned int loop_control) override
 	{

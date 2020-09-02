@@ -198,7 +198,14 @@ namespace reshade
 		virtual void render_imgui_draw_data(ImDrawData *draw_data) = 0;
 #endif
 
+		/// <summary>
+		/// Returns the texture object corresponding to the passed <paramref name="unique_name"/>.
+		/// </summary>
+		/// <param name="unique_name">The name of the texture to find.</param>
+		texture &look_up_texture_by_name(const std::string &unique_name);
+
 		bool _is_initialized = false;
+		bool _performance_mode = false;
 		bool _has_high_network_activity = false;
 		bool _has_depth_texture = false;
 		unsigned int _width = 0;
@@ -290,9 +297,9 @@ namespace reshade
 		// === Effect Loading ===
 		bool _no_debug_info = 0;
 		bool _no_reload_on_init = false;
-		bool _last_reload_successful = true;
+		bool _last_shader_reload_successful = true;
+		bool _last_texture_reload_successful = true;
 		bool _textures_loaded = false;
-		bool _performance_mode = false;
 		unsigned int _reload_key_data[4];
 		size_t _reload_total_effects = 1;
 		std::vector<size_t> _reload_compile_queue;
@@ -313,10 +320,12 @@ namespace reshade
 		bool _screenshot_include_preset = false;
 		bool _screenshot_clear_alpha = true;
 		unsigned int _screenshot_format = 1;
+		unsigned int _screenshot_naming = 0;
 		unsigned int _screenshot_key_data[4];
 		std::filesystem::path _screenshot_path;
 		std::filesystem::path _last_screenshot_file;
 		std::chrono::high_resolution_clock::time_point _last_screenshot_time;
+		unsigned int _screenshot_jpeg_quality = 90;
 
 		// === Preset Switching ===
 		bool _preset_save_success = true;
@@ -361,6 +370,7 @@ namespace reshade
 		bool _show_screenshot_message = true;
 		bool _no_font_scaling = false;
 		bool _rebuild_font_atlas = true;
+		unsigned int _reload_count = 0;
 		unsigned int _menu_key_data[4];
 		int _fps_pos = 1;
 		int _clock_format = 0;
@@ -402,6 +412,7 @@ namespace reshade
 		// === User Interface - Code Editor ===
 		imgui_code_editor _editor, _viewer;
 		std::filesystem::path _editor_file;
+		std::string _viewer_entry_point;
 #endif
 	};
 }

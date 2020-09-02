@@ -720,19 +720,25 @@ void imgui_code_editor::insert_character(char c, bool auto_indent)
 						line.erase(line.begin());
 						if (i == end.line && end.column > 0)
 							end.column--;
+						if (i == _cursor_pos.line && _cursor_pos.column > 0)
+							_cursor_pos.column--;
 					}
-					else for (size_t j = 0; j < _tab_size && line[0].c == ' '; j++) // Do the same for spaces
+					else for (size_t j = 0; j < _tab_size && !line.empty() && line[0].c == ' '; j++) // Do the same for spaces
 					{
 						line.erase(line.begin());
 						if (i == end.line && end.column > 0)
 							end.column--;
+						if (i == _cursor_pos.line && _cursor_pos.column > 0)
+							_cursor_pos.column--;
 					}
 				}
 				else
 				{
 					line.insert(line.begin(), { '\t', color_background });
 					if (i == end.line)
-						++end.column;
+						end.column++;
+					if (i == _cursor_pos.line)
+						_cursor_pos.column++;
 				}
 			}
 
@@ -745,6 +751,39 @@ void imgui_code_editor::insert_character(char c, bool auto_indent)
 
 		// Otherwise overwrite the selection
 		delete_selection();
+	}
+	else
+	{
+		if (c == '\t' && auto_indent && ImGui::GetIO().KeyShift)
+		{
+			auto &line = _lines[_cursor_pos.line];
+
+			if (line.empty())
+				return; // Line is already empty, so there is no indentation to remove
+
+			u.removed_beg = text_pos(_cursor_pos.line, 0);
+			u.removed_end = u.removed_beg;
+
+			if (line[0].c == '\t')
+			{
+				u.removed += line[0].c;
+				u.removed_end.column++;
+				line.erase(line.begin());
+				if (_cursor_pos.column > 0)
+					_cursor_pos.column--;
+			}
+			else for (size_t j = 0; j < _tab_size && !line.empty() && line[0].c == ' '; j++) // Do the same for spaces
+			{
+				u.removed += line[0].c;
+				u.removed_end.column++;
+				line.erase(line.begin());
+				if (_cursor_pos.column > 0)
+					_cursor_pos.column--;
+			}
+
+			record_undo(std::move(u));
+			return;
+		}
 	}
 
 	assert(!_lines.empty());
@@ -1690,6 +1729,7 @@ void imgui_code_editor::colorize()
 		case reshadefx::tokenid::uniform_:
 		case reshadefx::tokenid::volatile_:
 		case reshadefx::tokenid::precise:
+		case reshadefx::tokenid::groupshared:
 		case reshadefx::tokenid::in:
 		case reshadefx::tokenid::out:
 		case reshadefx::tokenid::inout:
@@ -1732,6 +1772,7 @@ void imgui_code_editor::colorize()
 		case reshadefx::tokenid::string_:
 		case reshadefx::tokenid::texture:
 		case reshadefx::tokenid::sampler:
+		case reshadefx::tokenid::storage:
 			col = color_keyword;
 			break;
 		case reshadefx::tokenid::hash_def:

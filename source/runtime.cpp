@@ -147,8 +147,8 @@ void reshade::runtime::on_reset()
 void reshade::runtime::on_present()
 {
 	// Get current time and date
-	time_t t = std::time(nullptr); tm tm;
-	localtime_s(&tm, &t);
+	const std::time_t t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+	tm tm; localtime_s(&tm, &t);
 	_date[0] = tm.tm_year + 1900;
 	_date[1] = tm.tm_mon + 1;
 	_date[2] = tm.tm_mday;
@@ -278,20 +278,33 @@ bool reshade::runtime::load_effect(const std::filesystem::path &path, size_t ind
 				pp.add_macro_definition(definition);
 		}
 
+		// Add some conversion macros for compatibility with older versions of ReShade
+		pp.append_string(
+			"#define tex2Dgather(s, t, c) tex2Dgather##c(s, t)\n"
+			"#define tex2Dgather0 tex2DgatherR\n"
+			"#define tex2Dgather1 tex2DgatherG\n"
+			"#define tex2Dgather2 tex2DgatherB\n"
+			"#define tex2Dgather3 tex2DgatherA\n"
+			"#define tex2Dgatheroffset(s, t, o, c) tex2Dgather##c##offset(s, t, o)\n"
+			"#define tex2Dgather0offset tex2DgatherRoffset\n"
+			"#define tex2Dgather1offset tex2DgatherGoffset\n"
+			"#define tex2Dgather2offset tex2DgatherBoffset\n"
+			"#define tex2Dgather3offset tex2DgatherAoffset\n");
+
 		if (!pp.append_file(path))
 			effect.compile_sucess = false;
 
 		unsigned shader_model;
-		if (_renderer_id == 0x9000)     // D3D9
-			shader_model = 30;
-		else if (_renderer_id < 0xa100) // D3D10
-			shader_model = 40;
-		else if (_renderer_id < 0xb000) // D3D11
-			shader_model = 41;
-		else if (_renderer_id < 0xc000) // D3D12
-			shader_model = 50;
+		if (_renderer_id == 0x9000)
+			shader_model = 30; // D3D9
+		else if (_renderer_id < 0xa100)
+			shader_model = 40; // D3D10 (including feature level 9)
+		else if (_renderer_id < 0xb000)
+			shader_model = 41; // D3D10.1
+		else if (_renderer_id < 0xc000)
+			shader_model = 50; // D3D11
 		else
-			shader_model = 60;
+			shader_model = 60; // D3D12
 
 		std::unique_ptr<reshadefx::codegen> codegen;
 		if ((_renderer_id & 0xF0000) == 0)
@@ -416,6 +429,8 @@ bool reshade::runtime::load_effect(const std::filesystem::path &path, size_t ind
 			var.special = special_uniform::mouse_delta;
 		else if (special == "mousebutton")
 			var.special = special_uniform::mouse_button;
+		else if (special == "mousewheel")
+			var.special = special_uniform::mouse_wheel;
 		else if (special == "freepie")
 			var.special = special_uniform::freepie;
 		else if (special == "overlay_open")
@@ -459,6 +474,10 @@ bool reshade::runtime::load_effect(const std::filesystem::path &path, size_t ind
 				}
 
 				existing_texture->shared = true;
+
+				// Always make shared textures render targets, since they may be used as such in a different effect
+				existing_texture->render_target = true;
+				existing_texture->storage_access = true;
 				continue;
 			}
 		}
@@ -502,8 +521,6 @@ bool reshade::runtime::load_effect(const std::filesystem::path &path, size_t ind
 		technique.effect_index = index;
 
 		technique.hidden = technique.annotation_as_int("hidden") != 0;
-		technique.timeout = technique.annotation_as_int("timeout");
-		technique.timeleft = technique.timeout;
 
 		if (technique.annotation_as_int("enabled"))
 			enable_technique(technique);
@@ -521,7 +538,7 @@ bool reshade::runtime::load_effect(const std::filesystem::path &path, size_t ind
 		std::move(new_textures.begin(), new_textures.end(), std::back_inserter(_textures));
 		std::move(new_techniques.begin(), new_techniques.end(), std::back_inserter(_techniques));
 
-		_last_reload_successful &= effect.compile_sucess;
+		_last_shader_reload_successful &= effect.compile_sucess;
 		_reload_remaining_effects--;
 	}
 
@@ -534,8 +551,9 @@ void reshade::runtime::load_effects()
 
 #if RESHADE_GUI
 	_show_splash = true; // Always show splash bar when reloading everything
+	_reload_count++;
 #endif
-	_last_reload_successful = true;
+	_last_shader_reload_successful = true;
 
 	// Reload preprocessor definitions from current preset before compiling
 	if (!_current_preset_path.empty())
@@ -574,9 +592,11 @@ void reshade::runtime::load_effects()
 }
 void reshade::runtime::load_textures()
 {
+	_last_texture_reload_successful = true;
+
 	LOG(INFO) << "Loading image files for textures ...";
 
-	for (const texture &texture : _textures)
+	for (texture &texture : _textures)
 	{
 		if (texture.impl == nullptr || texture.impl_reference != texture_reference::none)
 			continue; // Ignore textures that are not created yet and those that are handled in the runtime implementation
@@ -588,8 +608,10 @@ void reshade::runtime::load_textures()
 			continue;
 
 		// Search for image file using the provided search paths unless the path provided is already absolute
-		if (!find_file(_texture_search_paths, source_path)) {
+		if (!find_file(_texture_search_paths, source_path))
+		{
 			LOG(ERROR) << "Source " << source_path << " for texture '" << texture.unique_name << "' could not be found in any of the texture search paths.";
+			_last_texture_reload_successful = false;
 			continue;
 		}
 
@@ -609,8 +631,10 @@ void reshade::runtime::load_textures()
 				filedata = stbi_load_from_memory(mem.data(), static_cast<int>(mem.size()), &width, &height, &channels, STBI_rgb_alpha);
 		}
 
-		if (filedata == nullptr) {
+		if (filedata == nullptr)
+		{
 			LOG(ERROR) << "Source " << source_path << " for texture '" << texture.unique_name << "' could not be loaded! Make sure it is of a compatible file format.";
+			_last_texture_reload_successful = false;
 			continue;
 		}
 
@@ -629,6 +653,8 @@ void reshade::runtime::load_textures()
 		}
 
 		stbi_image_free(filedata);
+
+		texture.loaded = true;
 	}
 
 	_textures_loaded = true;
@@ -715,94 +741,103 @@ void reshade::runtime::update_and_render_effects()
 		// Finished loading effects, so apply preset to figure out which ones need compiling
 		load_current_preset();
 
-#if RESHADE_GUI
-		// Re-open last file in code editor after a reload
-		if (_show_code_editor && !_editor_file.empty())
-			if (const auto it = std::find_if(_effects.begin(), _effects.end(),
-				[this](const effect &fx) { return fx.source_file == _editor_file; }); it != _effects.end())
-				open_file_in_code_editor(it - _effects.begin(), _editor_file);
-#endif
-
 		_last_reload_time = std::chrono::high_resolution_clock::now();
 		_reload_total_effects = 0;
 		_reload_remaining_effects = std::numeric_limits<size_t>::max();
+
+#if RESHADE_GUI
+		// Re-open last file in code editor after a reload
+		if (_show_code_editor && !_editor_file.empty())
+		{
+			if (const auto it = std::find_if(_effects.begin(), _effects.end(),
+				[this](const effect &fx) { return fx.source_file == _editor_file; }); it != _effects.end())
+				open_file_in_code_editor(it - _effects.begin(), _editor_file);
+		}
+#endif
 	}
 	else if (_reload_remaining_effects != std::numeric_limits<size_t>::max())
 	{
 		return; // Cannot render while effects are still being loaded
 	}
-	else
+	else if (!_reload_compile_queue.empty())
 	{
-		if (!_reload_compile_queue.empty())
+		bool success = true;
+
+		// Pop an effect from the queue
+		const size_t effect_index = _reload_compile_queue.back();
+		_reload_compile_queue.pop_back();
+		effect &effect = _effects[effect_index];
+
+		// Create textures now, since they are referenced when building samplers in the 'init_effect' call below
+		for (texture &texture : _textures)
 		{
-			// Pop an effect from the queue
-			const size_t effect_index = _reload_compile_queue.back();
-			_reload_compile_queue.pop_back();
-			effect &effect = _effects[effect_index];
+			// Always create shared textures, since they may be in use by this effect already
+			if (texture.impl != nullptr || (texture.effect_index != effect_index && !texture.shared))
+				continue;
 
-			// Create textures now, since they are referenced when building samplers in the 'init_effect' call below
-			bool success = true;
-			for (texture &texture : _textures)
+			if (!init_texture(texture))
 			{
-				if (texture.impl == nullptr && (texture.effect_index == effect_index || texture.shared))
-				{
-					if (!init_texture(texture))
-					{
-						success = false;
-						effect.errors += "Failed to create texture " + texture.unique_name;
-						break;
-					}
-				}
-			}
-
-			// Compile the effect with the back-end implementation
-			if (success && !init_effect(effect_index))
-			{
-				// De-duplicate error lines (D3DCompiler sometimes repeats the same error multiple times)
-				for (size_t cur_line_offset = 0, next_line_offset, end_offset;
-					(next_line_offset = effect.errors.find('\n', cur_line_offset)) != std::string::npos && (end_offset = effect.errors.find('\n', next_line_offset + 1)) != std::string::npos; cur_line_offset = next_line_offset + 1)
-				{
-					const std::string_view cur_line(effect.errors.c_str() + cur_line_offset, next_line_offset - cur_line_offset);
-					const std::string_view next_line(effect.errors.c_str() + next_line_offset + 1, end_offset - next_line_offset - 1);
-
-					if (cur_line == next_line)
-					{
-						effect.errors.erase(next_line_offset, end_offset - next_line_offset);
-						next_line_offset = cur_line_offset - 1;
-					}
-				}
-
-				if (effect.errors.empty())
-					LOG(ERROR) << "Failed initializing " << effect.source_file << '.';
-				else
-					LOG(ERROR) << "Failed initializing " << effect.source_file << ":\n" << effect.errors;
-
 				success = false;
+				effect.errors += "Failed to create texture " + texture.unique_name;
+				break;
 			}
-
-			if (!success) // Something went wrong, do clean up
-			{
-				// Destroy all textures belonging to this effect
-				for (texture &tex : _textures)
-					if (tex.effect_index == effect_index && !tex.shared)
-						destroy_texture(tex);
-				// Disable all techniques belonging to this effect
-				for (technique &tech : _techniques)
-					if (tech.effect_index == effect_index)
-						disable_technique(tech);
-
-				effect.compile_sucess = false;
-				_last_reload_successful = false;
-			}
-
-			// An effect has changed, need to reload textures
-			_textures_loaded = false;
 		}
-		else if (!_textures_loaded)
+
+		// Compile the effect with the back-end implementation
+		if (success && (success = init_effect(effect_index)) == false)
 		{
-			// Now that all effects were compiled, load all textures
-			load_textures();
+			// De-duplicate error lines (D3DCompiler sometimes repeats the same error multiple times)
+			for (size_t cur_line_offset = 0, next_line_offset, end_offset;
+				(next_line_offset = effect.errors.find('\n', cur_line_offset)) != std::string::npos && (end_offset = effect.errors.find('\n', next_line_offset + 1)) != std::string::npos; cur_line_offset = next_line_offset + 1)
+			{
+				const std::string_view cur_line(effect.errors.c_str() + cur_line_offset, next_line_offset - cur_line_offset);
+				const std::string_view next_line(effect.errors.c_str() + next_line_offset + 1, end_offset - next_line_offset - 1);
+
+				if (cur_line == next_line)
+				{
+					effect.errors.erase(next_line_offset, end_offset - next_line_offset);
+					next_line_offset = cur_line_offset - 1;
+				}
+			}
+
+			if (effect.errors.empty())
+				LOG(ERROR) << "Failed initializing " << effect.source_file << '.';
+			else
+				LOG(ERROR) << "Failed initializing " << effect.source_file << ":\n" << effect.errors;
 		}
+
+		if (success == false) // Something went wrong, do clean up
+		{
+			// Destroy all textures belonging to this effect
+			for (texture &tex : _textures)
+				if (tex.effect_index == effect_index && !tex.shared)
+					destroy_texture(tex);
+			// Disable all techniques belonging to this effect
+			for (technique &tech : _techniques)
+				if (tech.effect_index == effect_index)
+					disable_technique(tech);
+
+			effect.compile_sucess = false;
+			_last_shader_reload_successful = false;
+		}
+
+		// An effect has changed, need to reload textures
+		_textures_loaded = false;
+
+#if RESHADE_GUI
+		// Update assembly in viewer after a reload
+		if (_show_code_viewer && !_viewer_entry_point.empty() && success)
+		{
+			if (const auto assembly_it = effect.assembly.find(_viewer_entry_point);
+				assembly_it != effect.assembly.end())
+				_viewer.set_text(assembly_it->second);
+		}
+#endif
+	}
+	else if (!_textures_loaded)
+	{
+		// Now that all effects were compiled, load all textures
+		load_textures();
 	}
 
 #ifdef NDEBUG
@@ -939,13 +974,17 @@ void reshade::runtime::update_and_render_effects()
 							set_uniform_value(variable, _input->is_key_down(keycode));
 					}
 					break;
-					}
+				}
 				case special_uniform::mouse_point:
+				{
 					set_uniform_value(variable, _input->mouse_position_x(), _input->mouse_position_y());
 					break;
+				}
 				case special_uniform::mouse_delta:
+				{
 					set_uniform_value(variable, _input->mouse_movement_delta_x(), _input->mouse_movement_delta_y());
 					break;
+				}
 				case special_uniform::mouse_button:
 				{
 					if (const int keycode = variable.annotation_as_int("keycode");
@@ -966,7 +1005,28 @@ void reshade::runtime::update_and_render_effects()
 					}
 					break;
 				}
+				case special_uniform::mouse_wheel:
+				{
+					const float min = variable.annotation_as_float("min");
+					const float max = variable.annotation_as_float("max");
+					float step = variable.annotation_as_float("step");
+					if (step == 0.0f)
+						step  = 1.0f;
+
+					float value[2] = { 0, 0 };
+					get_uniform_value(variable, value, 2);
+					value[1] = _input->mouse_wheel_delta();
+					value[0] = value[0] + value[1] * step;
+					if (min != max)
+					{
+						value[0] = std::max(value[0], min);
+						value[0] = std::min(value[0], max);
+					}
+					set_uniform_value(variable, value, 2);
+					break;
+				}
 				case special_uniform::freepie:
+				{
 					if (freepie_io_data data;
 						freepie_io_read(variable.annotation_as_int("index"), &data))
 					{
@@ -978,14 +1038,19 @@ void reshade::runtime::update_and_render_effects()
 						set_uniform_value(variable, array_values, 4 * 2);
 					}
 					break;
-				case special_uniform::overlay_open:
+				}
 #if RESHADE_GUI
+				case special_uniform::overlay_open:
+				{
 					set_uniform_value(variable, _show_menu);
-#endif
 					break;
+				}
+#endif
 				case special_uniform::bufready_depth:
+				{
 					set_uniform_value(variable, _has_depth_texture);
 					break;
+				}
 			}
 		}
 	}
@@ -993,13 +1058,7 @@ void reshade::runtime::update_and_render_effects()
 	// Render all enabled techniques
 	for (technique &technique : _techniques)
 	{
-		if (technique.timeleft > 0)
-		{
-			technique.timeleft -= std::chrono::duration_cast<std::chrono::milliseconds>(_last_frame_duration).count();
-			if (technique.timeleft <= 0)
-				disable_technique(technique);
-		}
-		else if (!_ignore_shortcuts && _input->is_key_pressed(technique.toggle_key_data, _force_shortcut_modifiers))
+		if (!_ignore_shortcuts && _input->is_key_pressed(technique.toggle_key_data, _force_shortcut_modifiers))
 		{
 			if (!technique.enabled)
 				enable_technique(technique);
@@ -1015,6 +1074,13 @@ void reshade::runtime::update_and_render_effects()
 		const auto time_technique_finished = std::chrono::high_resolution_clock::now();
 
 		technique.average_cpu_duration.append(std::chrono::duration_cast<std::chrono::nanoseconds>(time_technique_finished - time_technique_started).count());
+
+		if (technique.time_left > 0)
+		{
+			technique.time_left -= std::chrono::duration_cast<std::chrono::milliseconds>(_last_frame_duration).count();
+			if (technique.time_left <= 0)
+				disable_technique(technique);
+		}
 	}
 
 	if (_should_save_screenshot)
@@ -1030,7 +1096,7 @@ void reshade::runtime::enable_technique(technique &technique)
 
 	const bool status_changed = !technique.enabled;
 	technique.enabled = true;
-	technique.timeleft = technique.timeout;
+	technique.time_left = technique.annotation_as_int("timeout");
 
 	// Queue effect file for compilation if it was not fully loaded yet
 	if (technique.impl == nullptr && // Avoid adding the same effect multiple times to the queue if it contains multiple techniques that were enabled simultaneously
@@ -1049,7 +1115,7 @@ void reshade::runtime::disable_technique(technique &technique)
 
 	const bool status_changed =  technique.enabled;
 	technique.enabled = false;
-	technique.timeleft = 0;
+	technique.time_left = 0;
 	technique.average_cpu_duration.clear();
 	technique.average_gpu_duration.clear();
 
@@ -1091,6 +1157,7 @@ void reshade::runtime::load_config()
 	config.get("GENERAL", "ScreenshotSaveUI", _screenshot_save_ui);
 	config.get("GENERAL", "ScreenshotSaveBefore", _screenshot_save_before);
 	config.get("GENERAL", "ScreenshotIncludePreset", _screenshot_include_preset);
+	config.get("GENERAL", "ScreenshotJPEGQuality", _screenshot_jpeg_quality);
 	config.get("GENERAL", "ScreenshotClearAlpha", _screenshot_clear_alpha);
 
 	config.get("GENERAL", "NoDebugInfo", _no_debug_info);
@@ -1138,6 +1205,7 @@ void reshade::runtime::save_config() const
 	config.set("GENERAL", "ScreenshotSaveUI", _screenshot_save_ui);
 	config.set("GENERAL", "ScreenshotSaveBefore", _screenshot_save_before);
 	config.set("GENERAL", "ScreenshotIncludePreset", _screenshot_include_preset);
+	config.set("GENERAL", "ScreenshotJPEGQuality", _screenshot_jpeg_quality);
 	config.set("GENERAL", "ScreenshotClearAlpha", _screenshot_clear_alpha);
 
 	config.set("GENERAL", "NoDebugInfo", _no_debug_info);
@@ -1397,11 +1465,17 @@ void reshade::runtime::save_screenshot(const std::wstring &postfix, const bool s
 	const int minute = (_date[3] - hour * 3600) / 60;
 	const int seconds = _date[3] - hour * 3600 - minute * 60;
 
-	char filename[21];
-	sprintf_s(filename, " %.4d-%.2d-%.2d %.2d-%.2d-%.2d", _date[0], _date[1], _date[2], hour, minute, seconds);
+	char timestamp[21];
+	sprintf_s(timestamp, " %.4d-%.2d-%.2d %.2d-%.2d-%.2d", _date[0], _date[1], _date[2], hour, minute, seconds);
 
-	const std::wstring least = (_screenshot_path.is_relative() ? g_target_executable_path.parent_path() / _screenshot_path : _screenshot_path) / g_target_executable_path.stem().concat(filename);
-	const std::wstring screenshot_path = least + postfix + (_screenshot_format == 0 ? L".bmp" : L".png");
+	std::wstring filename = g_target_executable_path.stem().concat(timestamp);
+	if (_screenshot_naming == 1)
+		filename += L' ' + _current_preset_path.stem().wstring();
+
+	filename += postfix;
+	filename += _screenshot_format == 0 ? L".bmp" : _screenshot_format == 1 ? L".png" : L".jpg";
+
+	std::filesystem::path screenshot_path = g_target_executable_path.parent_path() / _screenshot_path / filename;
 
 	LOG(INFO) << "Saving screenshot to " << screenshot_path << " ...";
 
@@ -1410,7 +1484,8 @@ void reshade::runtime::save_screenshot(const std::wstring &postfix, const bool s
 	if (std::vector<uint8_t> data(_width * _height * 4); capture_screenshot(data.data()))
 	{
 		// Clear alpha channel
-		if (_screenshot_clear_alpha)
+		// The alpha channel doesn't need to be cleared if we're saving a JPEG, stbi ignores it
+		if (_screenshot_clear_alpha && _screenshot_format != 2)
 			for (uint32_t h = 0; h < _height; ++h)
 				for (uint32_t w = 0; w < _width; ++w)
 					data[(h * _width + w) * 4 + 3] = 0xFF;
@@ -1429,6 +1504,9 @@ void reshade::runtime::save_screenshot(const std::wstring &postfix, const bool s
 			case 1:
 				_screenshot_save_success = stbi_write_png_to_func(write_callback, file, _width, _height, 4, data.data(), 0) != 0;
 				break;
+			case 2:
+				_screenshot_save_success = stbi_write_jpg_to_func(write_callback, file, _width, _height, 4, data.data(), _screenshot_jpeg_quality) != 0;
+				break;
 			}
 
 			fclose(file);
@@ -1445,7 +1523,7 @@ void reshade::runtime::save_screenshot(const std::wstring &postfix, const bool s
 	else if (_screenshot_include_preset && should_save_preset && ini_file::flush_cache(_current_preset_path))
 	{
 		// Preset was flushed to disk, so can just copy it over to the new location
-		std::error_code ec; std::filesystem::copy_file(_current_preset_path, least + L".ini", std::filesystem::copy_options::overwrite_existing, ec);
+		std::error_code ec; std::filesystem::copy_file(_current_preset_path, screenshot_path.replace_extension(L".ini"), std::filesystem::copy_options::overwrite_existing, ec);
 	}
 }
 
@@ -1673,4 +1751,12 @@ void reshade::runtime::reset_uniform_value(uniform &variable)
 			break;
 		}
 	}
+}
+
+reshade::texture &reshade::runtime::look_up_texture_by_name(const std::string &unique_name)
+{
+	const auto it = std::find_if(_textures.begin(), _textures.end(),
+		[&unique_name](const auto &item) { return item.unique_name == unique_name && item.impl != nullptr; });
+	assert(it != _textures.end());
+	return *it;
 }

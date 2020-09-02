@@ -15,6 +15,7 @@ using System.Linq;
 using System.Net;
 using System.Reflection;
 using System.Security.Principal;
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Input;
 
@@ -122,6 +123,20 @@ namespace ReShade.Setup
 			}
 			catch
 			{
+				return false;
+			}
+		}
+
+		static bool ReShadeExists(string path, out bool isReShade)
+		{
+			if (File.Exists(path))
+			{
+				isReShade = FileVersionInfo.GetVersionInfo(path).ProductName == "ReShade";
+				return true;
+			}
+			else
+			{
+				isReShade = false;
 				return false;
 			}
 		}
@@ -437,10 +452,9 @@ namespace ReShade.Setup
 					configPath = alternativeConfigPath;
 				}
 
-				if (File.Exists(modulePath) && !isHeadless)
+				if (ReShadeExists(modulePath, out bool isReShade) && !isHeadless)
 				{
-					var moduleInfo = FileVersionInfo.GetVersionInfo(modulePath);
-					if (moduleInfo.ProductName == "ReShade")
+					if (isReShade)
 					{
 						ApiGroup.Visibility = Visibility.Collapsed;
 						InstallButtons.Visibility = Visibility.Visible;
@@ -454,6 +468,25 @@ namespace ReShade.Setup
 					{
 						UpdateStatusAndFinish(false, Path.GetFileName(modulePath) + " already exists, but does not belong to ReShade.", "Please make sure this is not a system file required by the game.");
 					}
+					return;
+				}
+			}
+
+			if (!isHeadless)
+			{
+				if (ApiD3D9.IsChecked != true && ReShadeExists(Path.Combine(targetDir, "d3d9.dll"), out bool isD3D9ReShade) && isD3D9ReShade)
+				{
+					UpdateStatusAndFinish(false, "Existing ReShade installation for Direct3D 9 found.", "Multiple simultaneous ReShade installations are not supported. Please uninstall the existing one first.");
+					return;
+				}
+				if (ApiDXGI.IsChecked != true && ReShadeExists(Path.Combine(targetDir, "dxgi.dll"), out bool isDXGIReShade) && isDXGIReShade)
+				{
+					UpdateStatusAndFinish(false, "Existing ReShade installation for Direct3D 10/11/12 found.", "Multiple simultaneous ReShade installations are not supported. Please uninstall the existing one first.");
+					return;
+				}
+				if (ApiOpenGL.IsChecked != true && ReShadeExists(Path.Combine(targetDir, "opengl32.dll"), out bool isOpenGLReShade) && isOpenGLReShade)
+				{
+					UpdateStatusAndFinish(false, "Existing ReShade installation for OpenGL found.", "Multiple simultaneous ReShade installations are not supported. Please uninstall the existing one first.");
 					return;
 				}
 			}
@@ -503,7 +536,7 @@ In that event here are some steps you can try to resolve this:
 3) If the game crashes, try disabling all game overlays (like Origin), recording software (like Fraps), FPS displaying software,
    GPU overclocking and tweaking software and other proxy DLLs (like ENB, Helix or Umod).
 
-4) If none of the above helps, you can get support on the forums at https://forum.reshade.me. But search for your problem before
+4) If none of the above helps, you can get support on the forums at https://reshade.me/forum. But search for your problem before
    creating a new topic, as somebody else may have already found a solution.
 ");
 			}
@@ -526,11 +559,28 @@ In that event here are some steps you can try to resolve this:
 			var config = new IniFile(configPath);
 			if (compatibilityIni != null && !config.HasValue("GENERAL", "PreprocessorDefinitions"))
 			{
+				string depthReversed = compatibilityIni.GetString(targetName, "DepthReversed", "0");
+				string depthUpsideDown = compatibilityIni.GetString(targetName, "DepthUpsideDown", "0");
+				string depthLogarithmic = compatibilityIni.GetString(targetName, "DepthLogarithmic", "0");
+				if (!compatibilityIni.HasValue(targetName, "DepthReversed"))
+				{
+					var info = FileVersionInfo.GetVersionInfo(targetPath);
+					if (info.LegalCopyright != null)
+					{
+						Match match = new Regex("(20[0-9]{2})", RegexOptions.RightToLeft).Match(info.LegalCopyright);
+						if (match.Success && int.TryParse(match.Groups[1].Value, out int year))
+						{
+							// Modern games usually use reversed depth
+							depthReversed = year >= 2012 ? "1" : "0";
+						}
+					}
+				}
+
 				config.SetValue("GENERAL", "PreprocessorDefinitions",
 					"RESHADE_DEPTH_LINEARIZATION_FAR_PLANE=1000.0",
-					"RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN=" + compatibilityIni.GetString(targetName, "DepthUpsideDown", "0"),
-					"RESHADE_DEPTH_INPUT_IS_REVERSED=" + compatibilityIni.GetString(targetName, "DepthReversed", "0"),
-					"RESHADE_DEPTH_INPUT_IS_LOGARITHMIC=" + compatibilityIni.GetString(targetName, "DepthLogarithmic", "0"));
+					"RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN=" + depthUpsideDown,
+					"RESHADE_DEPTH_INPUT_IS_REVERSED=" + depthReversed,
+					"RESHADE_DEPTH_INPUT_IS_LOGARITHMIC=" + depthLogarithmic);
 
 				if (compatibilityIni.HasValue(targetName, "DepthCopyBeforeClears") ||
 					compatibilityIni.HasValue(targetName, "UseAspectRatioHeuristics"))
@@ -552,6 +602,9 @@ In that event here are some steps you can try to resolve this:
 						case "D3D12":
 							config.SetValue("DX12_BUFFER_DETECTION", "DepthBufferRetrievalMode", compatibilityIni.GetString(targetName, "DepthCopyBeforeClears", "0"));
 							config.SetValue("DX12_BUFFER_DETECTION", "UseAspectRatioHeuristics", compatibilityIni.GetString(targetName, "UseAspectRatioHeuristics", "1"));
+							break;
+						case "Vulkan":
+							config.SetValue("VULKAN_BUFFER_DETECTION", "UseAspectRatioHeuristics", compatibilityIni.GetString(targetName, "UseAspectRatioHeuristics", "1"));
 							break;
 					}
 				}
